@@ -1,153 +1,187 @@
+/**
+ * Blibli Scraper — Playwright + stealth, persistent profile.
+ *
+ * 1. Try direct HTTP API first (fast, no browser needed).
+ * 2. If Cloudflare blocks (403), fall back to Playwright browser scraping.
+ * 3. DOM scraping enriches / fills in rating & sold count.
+ */
+
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
+const https = require('https');
+const fs = require('fs');
 const path = require('path');
 
 chromium.use(stealth);
 
-/**
- * Handle Cloudflare challenge page.
- * Waits for auto-verification, or tries to click the checkbox inside the CF iframe.
- */
-async function handleCloudflare(page) {
-    const isCfPage = async () => {
-        const t = await page.title();
-        return t.includes('Tunggu') || t.includes('Just a moment') ||
-               t.includes('Checking') || t.includes('Verifikasi');
-    };
+const PROFILE_DIR = path.join(__dirname, 'blibli-profile');
+const COOKIE_CACHE = path.join(__dirname, 'blibli-cookies.json');
 
-    if (!(await isCfPage())) return;
-    console.error('   [CF] Cloudflare challenge detected, attempting bypass...');
-
-    // Poll up to 20 seconds for auto-resolve first
-    for (let i = 0; i < 10; i++) {
-        await page.waitForTimeout(2000);
-        if (!(await isCfPage())) {
-            console.error('   [CF] Auto-verified after', (i + 1) * 2, 'seconds!');
-            return;
-        }
+// ─── Cookie helpers ─────────────────────────────────────────────────────────
+function loadCookies() {
+    if (fs.existsSync(COOKIE_CACHE)) {
+        try {
+            const data = JSON.parse(fs.readFileSync(COOKIE_CACHE, 'utf8'));
+            if (Date.now() - (data.savedAt || 0) < 12 * 60 * 60 * 1000) return data.cookies;
+        } catch (_) {}
     }
-
-    // Still blocked — try clicking the Turnstile checkbox inside the iframe
-    console.error('   [CF] Auto-verify failed, trying manual click...');
-    try {
-        const frames = page.frames();
-        for (const frame of frames) {
-            if (!frame.url().includes('cloudflare.com')) continue;
-            console.error('   [CF] Found CF iframe:', frame.url().substring(0, 80));
-
-            // Try multiple selectors for the Turnstile widget
-            const selectors = [
-                '.ctp-checkbox-label',
-                '.mark',
-                'input[type="checkbox"]',
-                'label',
-                'body',
-            ];
-            for (const sel of selectors) {
-                try {
-                    const el = await frame.$(sel);
-                    if (el) {
-                        // Use human-like mouse move + click
-                        const box = await el.boundingBox();
-                        if (box) {
-                            await page.mouse.move(
-                                box.x + box.width / 2 + Math.random() * 4 - 2,
-                                box.y + box.height / 2 + Math.random() * 4 - 2
-                            );
-                            await page.waitForTimeout(300);
-                            await el.click();
-                            console.error('   [CF] Clicked:', sel);
-                            break;
-                        }
-                    }
-                } catch (_) {}
-            }
-            break;
-        }
-    } catch (e) {
-        console.error('   [CF] Click error:', e.message);
-    }
-
-    // Wait up to 15 more seconds for redirect after click
-    for (let i = 0; i < 8; i++) {
-        await page.waitForTimeout(2000);
-        if (!(await isCfPage())) {
-            console.error('   [CF] Passed after manual click!');
-            return;
-        }
-    }
-
-    console.error('   [CF] Warning: still on Cloudflare page, continuing anyway...');
+    return null;
 }
 
-async function scrapeBlibli(keyword, limit = 10) {
-    console.error('=== Blibli Scraper ===\n');
-    
-    const userDataDir = path.join(__dirname, 'blibli-profile');
-    
-    const context = await chromium.launchPersistentContext(userDataDir, {
-        headless: false,
-        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-        viewport: { width: 1280, height: 900 },
-        locale: 'id-ID',
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+function saveCookies(cookies) {
+    fs.writeFileSync(COOKIE_CACHE, JSON.stringify({ savedAt: Date.now(), cookies }));
+}
+
+// ─── Direct HTTP GET (for API-first approach) ───────────────────────────────
+function httpGet(url, cookies = []) {
+    return new Promise((resolve, reject) => {
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'id-ID,id;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.blibli.com/',
+            'Origin': 'https://www.blibli.com',
+        };
+        if (cookies.length > 0) headers['Cookie'] = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+        const req = https.get(url, { headers }, (res) => {
+            const chunks = [];
+            let stream = res;
+            const enc = res.headers['content-encoding'];
+            const zlib = require('zlib');
+            if (enc === 'gzip') stream = res.pipe(zlib.createGunzip());
+            else if (enc === 'br') stream = res.pipe(zlib.createBrotliDecompress());
+            else if (enc === 'deflate') stream = res.pipe(zlib.createInflate());
+            stream.on('data', c => chunks.push(c));
+            stream.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+            stream.on('error', reject);
+        });
+        req.on('error', reject);
+        req.setTimeout(20000, () => { req.destroy(); reject(new Error('HTTP timeout')); });
     });
+}
+
+// ─── Parse Blibli backend API JSON ──────────────────────────────────────────
+function parseApiProducts(json) {
+    const products = [];
+    const items = json?.data?.products || json?.data?.items || json?.products || json?.items || [];
+
+    for (const item of items) {
+        const p = item?.product ?? item;
+
+        // Price
+        const priceObj = p.salePrice ?? p.finalPrice ?? p.price ?? {};
+        let price = '';
+        if (typeof priceObj === 'number') price = 'Rp' + priceObj.toLocaleString('id-ID');
+        else if (typeof priceObj === 'object' && priceObj !== null) {
+            const val = priceObj.minPrice ?? priceObj.value ?? priceObj.amount ?? 0;
+            price = 'Rp' + Number(val).toLocaleString('id-ID');
+        } else if (typeof priceObj === 'string') price = priceObj;
+
+        // Rating
+        const rating = p.rating ?? p.averageRating ?? p.reviewSummary?.rating
+            ?? p.review?.rating ?? p.review?.averageRating ?? null;
+
+        // Sold
+        const soldRaw = p.soldCount ?? p.itemSoldCount ?? p.totalSold
+            ?? p.reviewSummary?.transactionCount ?? null;
+        const sold = soldRaw != null ? 'Terjual ' + soldRaw : null;
+
+        // Image
+        const image = p.images?.[0] ?? p.image ?? p.defaultImage ?? p.imageUrl ?? '';
+
+        // URL
+        const url = p.url ?? (p.sku ? `https://www.blibli.com/p/${p.sku}` : '');
+
+        if (p.name && price) {
+            products.push({
+                name: p.name,
+                price,
+                image,
+                rating: rating != null ? parseFloat(rating) : null,
+                sold,
+                link: url,
+                marketplace: 'blibli',
+            });
+        }
+    }
+    return products;
+}
+
+// ─── Cloudflare handler ─────────────────────────────────────────────────────
+async function handleCloudflare(page) {
+    const isCF = async () => {
+        const t = await page.title();
+        return t.includes('Tunggu') || t.includes('Just a moment') || t.includes('Checking') || t.includes('Verifikasi');
+    };
+    if (!(await isCF())) return;
+    console.error('   [CF] Challenge detected, waiting...');
+
+    for (let i = 0; i < 15; i++) {
+        await page.waitForTimeout(2000);
+        if (!(await isCF())) { console.error('   [CF] Passed!'); return; }
+    }
+    console.error('   [CF] Still blocked after 30s, continuing anyway...');
+}
+
+// ─── Browser-based fallback (DOM scraping) ──────────────────────────────────
+async function scrapeBrowserFallback(keyword, limit) {
+    console.error('[Browser] Launching Playwright fallback...');
+    let context;
+    try {
+        context = await chromium.launchPersistentContext(PROFILE_DIR, {
+            headless: false,
+            args: ['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-http2'],
+            viewport: { width: 1280, height: 900 },
+            locale: 'id-ID',
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        });
+    } catch (err) {
+        return { success: false, error: 'Browser launch failed: ' + err.message, data: [] };
+    }
 
     const page = context.pages()[0] || await context.newPage();
-    let products = [];
+    let apiProducts = [];
 
     // Intercept API responses
     page.on('response', async (response) => {
-        const url = response.url();
         try {
+            const url = response.url();
             if (url.includes('blibli') && response.status() === 200) {
-                const contentType = response.headers()['content-type'] || '';
-                if (contentType.includes('json')) {
+                const ct = response.headers()['content-type'] || '';
+                if (ct.includes('json')) {
                     const text = await response.text();
-                    if (text.includes('"products"') || text.includes('"data"') || text.includes('"sku"') || text.includes('"items"')) {
-                        console.error('   [API] Found data in:', url.substring(0, 60));
+                    if (text.includes('"products"') || text.includes('"sku"')) {
                         const json = JSON.parse(text);
-                        const before = products.length;
-                        extractBlibliProducts(json, products);
-                        if (products.length > before) {
-                            console.error('   [API] Extracted', products.length - before, 'products, sample rating:', products[before]?.rating, 'sold:', products[before]?.sold);
+                        const found = parseApiProducts(json);
+                        if (found.length > 0) {
+                            console.error(`   [API] Intercepted ${found.length} products`);
+                            apiProducts.push(...found);
                         }
                     }
                 }
             }
-        } catch (e) {}
+        } catch (_) {}
     });
 
     try {
-        // Blibli search URL
         const searchUrl = `https://www.blibli.com/cari/${encodeURIComponent(keyword)}`;
-        console.error('1. Searching:', keyword);
-        console.error('   URL:', searchUrl);
-        
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        
-        console.error('2. Waiting for page to load...');
-        await page.waitForTimeout(3000);
+        console.error('[Browser] Navigating:', searchUrl);
 
-        // Handle Cloudflare challenge
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await page.waitForTimeout(3000);
         await handleCloudflare(page);
 
-        // Check current URL
-        const currentUrl = page.url();
-        console.error('   Current URL:', currentUrl.substring(0, 80));
-
-        // Scroll to load more
-        console.error('3. Scrolling to load products...');
+        // Scroll to load products
         for (let i = 0; i < 4; i++) {
             await page.evaluate(() => window.scrollBy(0, 600));
-            await page.waitForTimeout(1000);
-            console.error(`   Scroll ${i+1}/4, products: ${products.length}`);
-            if (products.length >= limit) break;
+            await page.waitForTimeout(1200);
         }
+        await page.waitForTimeout(2000);
 
-        // Always run DOM scraping: enrich API products with sold, or fill in if API missed products
-        console.error('4. Enriching from DOM...');
-        
+        // ── DOM scraping: rating & sold ──
+        console.error('[Browser] DOM scraping...');
         const domProducts = await page.evaluate(() => {
             const items = [];
             const cards = document.querySelectorAll('a.elf-product-card');
@@ -157,39 +191,36 @@ async function scrapeBlibli(keyword, limit = 10) {
                 if (!href.includes('blibli.com/p/')) return;
 
                 const text = card.innerText || '';
-
-                // Name: split by newline, skip leading "Ad" line if present
                 const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
                 const adIdx = lines[0] === 'Ad' ? 1 : 0;
                 const name = lines[adIdx] || '';
 
-                // Price: first Rp occurrence with Indonesian thousand-dot format
-                let price = 'N/A';
+                // Price
+                let price = '';
                 const priceMatch = text.match(/Rp\s?([\d]{1,3}(?:\.[\d]{3})*)/);
                 if (priceMatch) price = 'Rp' + priceMatch[1];
 
-                // Rating: standalone digit (with optional comma/dot decimal) on its own line, before "Terjual"
+                // Rating: standalone digit line like "4.8" before "Terjual"
                 let rating = null;
                 const ratingMatch = text.match(/\n(\d(?:[.,]\d)?)\n/);
-                if (ratingMatch) {
-                    rating = parseFloat(ratingMatch[1].replace(',', '.'));
-                }
+                if (ratingMatch) rating = parseFloat(ratingMatch[1].replace(',', '.'));
 
-// Sold: "Terjual 160" or "Terjual 1,3 rb+" — capture full token including optional "rb"
-                    let sold = null;
-                    const soldMatch = text.match(/Terjual\s+([\d.,]+(?:\s*rb[+]?)?)/i);
-                    if (soldMatch) sold = 'Terjual ' + soldMatch[1].trim();
+                // Sold: "Terjual 160" or "Terjual 1,3 rb+"
+                let sold = null;
+                const soldMatch = text.match(/Terjual\s+([\d.,]+(?:\s*rb[+]?)?)/i);
+                if (soldMatch) sold = 'Terjual ' + soldMatch[1].trim();
 
                 const imgEl = card.querySelector('img');
 
                 if (name.length > 5 && href) {
                     items.push({
                         name: name.substring(0, 200),
-                        price: price,
+                        price,
                         image: imgEl?.src || '',
-                        rating: rating,
-                        sold: sold,
-                        link: href
+                        rating,
+                        sold,
+                        link: href,
+                        marketplace: 'blibli',
                     });
                 }
             });
@@ -197,119 +228,125 @@ async function scrapeBlibli(keyword, limit = 10) {
             return items;
         });
 
-        console.error('   Found', domProducts.length, 'products in DOM');
+        console.error(`[Browser] DOM found ${domProducts.length} products`);
 
-        domProducts.forEach(domP => {
-            // Try to enrich existing API product with sold/rating from DOM
-            const existing = products.find(p => p.link === domP.link);
-            if (existing) {
-                if (!existing.sold && domP.sold) existing.sold = domP.sold;
-                if (!existing.rating && domP.rating) existing.rating = domP.rating;
-            } else {
-                // API missed it — add directly from DOM
-                products.push({ ...domP, marketplace: 'blibli' });
-            }
-        });
-
-        console.error('\n=== RESULT ===');
-        console.error('Total products:', products.length);
+        // Save cookies for next API run
+        try {
+            const cookies = await context.cookies();
+            saveCookies(cookies.filter(c => c.domain.includes('blibli')));
+            console.error('[Browser] Saved cookies for next API run');
+        } catch (_) {}
 
         await context.close();
 
-        // Dedupe and limit
+        // ── Merge: API intercepted + DOM ──
+        const merged = [...apiProducts];
+        const seenLinks = new Set(apiProducts.map(p => p.link));
+
+        for (const dp of domProducts) {
+            const existing = merged.find(p => p.link === dp.link || p.name === dp.name);
+            if (existing) {
+                if (!existing.sold && dp.sold) existing.sold = dp.sold;
+                if (!existing.rating && dp.rating) existing.rating = dp.rating;
+                if (!existing.image && dp.image) existing.image = dp.image;
+            } else if (!seenLinks.has(dp.link)) {
+                seenLinks.add(dp.link);
+                merged.push(dp);
+            }
+        }
+
+        // Dedupe & limit
         const unique = [];
         const seen = new Set();
-        for (const p of products) {
-            if (!seen.has(p.link) && unique.length < limit) {
-                seen.add(p.link);
-                unique.push({ ...p, marketplace: 'blibli' });
+        for (const p of merged) {
+            const key = p.link || p.name;
+            if (!seen.has(key) && unique.length < limit) {
+                seen.add(key);
+                unique.push(p);
             }
         }
 
         return { success: unique.length > 0, data: unique, count: unique.length };
 
     } catch (error) {
-        console.error('Error:', error.message);
+        console.error('[Browser] Error:', error.message);
         await context.close().catch(() => {});
         return { success: false, error: error.message, data: [] };
     }
 }
 
-function extractBlibliProducts(obj, products) {
-    if (!obj || typeof obj !== 'object') return;
-    
-    // Check for Blibli product structure
-    if ((obj.sku || obj.id) && obj.name && (obj.price || obj.salePrice || obj.finalPrice)) {
-        const priceObj = obj.salePrice || obj.finalPrice || obj.price;
-        let price = priceObj;
-        
-        // Handle price object
-        if (typeof priceObj === 'object' && priceObj !== null) {
-            price = priceObj.value || priceObj.minPrice || priceObj.amount || 0;
+// ─── Main: API first → browser fallback ─────────────────────────────────────
+async function scrapeBlibli(keyword, limit = 10) {
+    console.error('=== Blibli Scraper ===');
+
+    // 1️⃣  Try API first (fast, no browser)
+    const cookies = loadCookies() || [];
+    if (cookies.length > 0) {
+        try {
+            const apiUrl = `https://www.blibli.com/backend/search/products?`
+                + `searchTerm=${encodeURIComponent(keyword)}`
+                + `&start=0&itemPerPage=${limit}&channelId=web&listType=COLUMN&sort=7`;
+            console.error('[API] Trying direct HTTP...');
+            const { status, body } = await httpGet(apiUrl, cookies);
+            console.error('[API] Status:', status);
+
+            if (status === 200) {
+                const json = JSON.parse(body);
+                const products = parseApiProducts(json);
+                if (products.length > 0) {
+                    console.error('[API] Got', products.length, 'products');
+                    return { success: true, data: products.slice(0, limit), count: products.length };
+                }
+            }
+        } catch (e) {
+            console.error('[API] Error:', e.message);
         }
-        
-        const priceStr = typeof price === 'number' ? 'Rp' + price.toLocaleString('id-ID') : String(price);
-        
-        const exists = products.some(p => p.link?.includes(obj.sku) || p.link?.includes(obj.url));
-        
-        // Extract rating - Blibli uses various field names
-        const rating = obj.review?.rating
-            || obj.review?.averageRating
-            || obj.rating
-            || obj.averageRating
-            || obj.ratingAverage
-            || obj.productRating
-            || null;
-
-        // Extract sold count - Blibli uses various field names
-        const soldRaw = obj.soldCount
-            || obj.itemSoldCount
-            || obj.totalSold
-            || obj.quantitySold
-            || obj.review?.totalPurchased
-            || obj.totalReview
-            || obj.reviewCount
-            || null;
-        const sold = soldRaw ? soldRaw + ' terjual' : null;
-
-        if (!exists) {
-            products.push({
-                name: obj.name,
-                price: priceStr,
-                image: obj.images?.[0] || obj.image || obj.itemImages?.[0] || obj.defaultImage || '',
-                rating: rating ? parseFloat(rating) : null,
-                sold: sold,
-                link: obj.url || `https://www.blibli.com/p/${obj.sku}`,
-                marketplace: 'blibli'
-            });
-        }
-        return;
-    }
-
-    // Check for products/data arrays
-    if (obj.products && Array.isArray(obj.products)) {
-        obj.products.forEach(p => extractBlibliProducts(p, products));
-        return;
-    }
-    if (obj.data?.products && Array.isArray(obj.data.products)) {
-        obj.data.products.forEach(p => extractBlibliProducts(p, products));
-        return;
-    }
-
-    // Recurse
-    if (Array.isArray(obj)) {
-        obj.forEach(item => extractBlibliProducts(item, products));
+        console.error('[API] Failed or empty, falling back to browser...');
     } else {
-        for (const val of Object.values(obj)) {
-            if (typeof val === 'object') extractBlibliProducts(val, products);
-        }
+        console.error('[API] No cookies, going straight to browser...');
     }
+
+    // 2️⃣  Browser fallback
+    return scrapeBrowserFallback(keyword, limit);
 }
 
+// ─── Setup: open browser to pass Cloudflare manually ────────────────────────
+async function setup() {
+    console.error('Opening browser for Cloudflare setup...');
+    const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+        headless: false,
+        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+        viewport: { width: 1280, height: 900 },
+        locale: 'id-ID',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    });
+    const page = context.pages()[0] || await context.newPage();
+    await page.goto('https://www.blibli.com/cari/laptop', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    console.error('Pass the Cloudflare challenge in the browser window...');
+    try {
+        await page.waitForFunction(
+            () => !document.title.includes('Tunggu') && !document.title.includes('Just a moment')
+                && document.querySelectorAll('a[href*="/p/"]').length > 0,
+            { timeout: 60000 }
+        );
+    } catch (_) { console.error('Timeout, saving whatever cookies exist.'); }
+    const cookies = await context.cookies();
+    saveCookies(cookies.filter(c => c.domain.includes('blibli')));
+    console.error('Saved', cookies.length, 'cookies. Setup complete!');
+    await context.close();
+}
+
+// ─── CLI ─────────────────────────────────────────────────────────────────────
 if (require.main === module) {
-    const args = process.argv.slice(2);
-    scrapeBlibli(args[0] || 'laptop', parseInt(args[1]) || 10)
-        .then(r => console.log(JSON.stringify(r, null, 2)));
+    if (process.argv[2] === '--setup') {
+        setup().catch(e => console.error('Setup error:', e.message));
+    } else {
+        const keyword = process.argv[2] || 'laptop';
+        const limit = parseInt(process.argv[3]) || 10;
+        scrapeBlibli(keyword, limit)
+            .then(r => { console.log(JSON.stringify(r, null, 2)); process.exit(r.success ? 0 : 1); })
+            .catch(e => { console.log(JSON.stringify({ success: false, error: e.message, data: [] })); process.exit(1); });
+    }
 }
 
 module.exports = { scrapeBlibli };

@@ -1,59 +1,103 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# PriceCompare
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Aplikasi perbandingan harga produk dari **Tokopedia** dan **Blibli**. Built with Laravel + Playwright web scraping.
 
-## About Laravel
+## Features
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- 🔍 Cari produk dari Tokopedia & Blibli sekaligus
+- 💰 Bandingkan harga, rating, dan jumlah terjual
+- ⚡ Caching hasil pencarian (15 menit)
+- 🤖 Anti-detection: stealth plugin + persistent browser profile
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## Tech Stack
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+- **Backend:** Laravel 12 (PHP)
+- **Scraper:** Node.js + Playwright + playwright-extra (stealth)
+- **Frontend:** Blade + Tailwind CSS
 
-## Learning Laravel
+## Setup (New Device)
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+### Prerequisites
+- PHP 8.2+, Composer
+- Node.js 18+, npm
+- SQLite (default) atau MySQL
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+### 1. Clone & Install Dependencies
 
-## Laravel Sponsors
+```bash
+git clone https://github.com/darrenhasnah/PriceCompare.git
+cd PriceCompare
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+# PHP dependencies
+composer install
 
-### Premium Partners
+# Node dependencies (Playwright + stealth)
+npm install
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+# Install Playwright Chromium browser
+npx playwright install chromium
+```
 
-## Contributing
+### 2. Laravel Setup
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```bash
+cp .env.example .env
+php artisan key:generate
+php artisan migrate
+```
 
-## Code of Conduct
+### 3. Blibli Cloudflare Setup (wajib 1x per device)
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+Blibli pakai Cloudflare protection. Perlu buka browser manual 1x untuk pass challenge:
 
-## Security Vulnerabilities
+```bash
+node scraper/blibli-scraper.cjs --setup
+```
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+Browser akan terbuka → tunggu sampai halaman Blibli load → cookies otomatis tersimpan.
 
-## License
+### 4. Run
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+```bash
+# Terminal 1: Laravel dev server
+php artisan serve
+
+# Terminal 2: Vite (CSS/JS)
+npm run dev
+```
+
+Buka http://localhost:8000 → cari produk!
+
+## API Endpoints
+
+| Method | Endpoint | Keterangan |
+|--------|----------|------------|
+| GET | `/api/scrape?keyword=laptop&limit=10` | Cari produk |
+| POST | `/api/cache/clear` | Hapus cache expired |
+| GET | `/api/cache/stats` | Statistik cache |
+
+## Project Structure
+
+```
+PriceCompare/
+├── app/
+│   ├── Http/Controllers/Api/  → ScraperController
+│   ├── Services/              → ScraperService (orchestrates scrapers)
+│   └── Models/                → SearchCache
+├── scraper/
+│   ├── tokopedia-api.cjs      → Tokopedia scraper (GQL + DOM)
+│   ├── blibli-scraper.cjs     → Blibli scraper (API + DOM fallback)
+│   └── blibli-api.cjs         → Blibli direct HTTP API
+├── resources/views/
+│   └── search.blade.php       → Search UI
+└── routes/
+    ├── web.php                → GET / → search page
+    └── api.php                → API routes
+```
+
+## Notes
+
+- **Tokopedia** profile (`scraper/tokopedia-profile/`) dibuat otomatis saat pertama run
+- **Blibli** perlu `--setup` karena Cloudflare. Cookie valid ~12 jam, kalau expired akan auto-fallback ke browser
+- Browser profiles & cookies di-gitignore (machine-specific)
+- Rate limit: 1 request per 10 detik per IP
