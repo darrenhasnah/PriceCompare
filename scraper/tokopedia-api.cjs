@@ -30,6 +30,8 @@ async function scrapeTokopedia(keyword, limit = 10) {
                 '--no-sandbox',
                 '--disable-gpu',
                 '--disable-http2',
+                '--start-minimized',
+                '--window-position=-32000,-32000',
             ],
             viewport: { width: 1366, height: 768 },
             locale: 'id-ID',

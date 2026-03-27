@@ -11,5 +11,6 @@ use Illuminate\Support\Facades\Route;
 
 // Scraper routes
 Route::get('/scrape', [ScraperController::class, 'search']);
+Route::get('/sponsored/random', [ScraperController::class, 'randomSponsored']);
 Route::post('/cache/clear', [ScraperController::class, 'clearCache']);
 Route::get('/cache/stats', [ScraperController::class, 'cacheStats']);
