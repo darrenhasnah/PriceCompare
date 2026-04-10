@@ -1,7 +1,12 @@
 (() => {
+    const AUTO_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+    const WARNING_SECONDS = 10;
+    const AUTO_REFRESH_STORAGE_KEY = 'pc:auto-refresh-enabled';
+
     const searchForm = document.getElementById('searchForm');
     const keywordInput = document.getElementById('keyword');
     const searchBtn = document.getElementById('searchBtn');
+    const cancelSearchBtn = document.getElementById('cancelSearchBtn');
     const loading = document.getElementById('loading');
     const error = document.getElementById('error');
     const errorMsg = document.getElementById('errorMsg');
@@ -10,29 +15,96 @@
     const loadingProgressBar = document.getElementById('loadingProgressBar');
     const loadingPercent = document.getElementById('loadingPercent');
     const loadingStatus = document.getElementById('loadingStatus');
+    const autoRefreshBadge = document.getElementById('autoRefreshBadge');
+    const autoRefreshHint = document.getElementById('autoRefreshHint');
+    const autoRefreshTimer = document.getElementById('autoRefreshTimer');
+    const autoRefreshToggle = document.getElementById('autoRefreshToggle');
+    const autoRefreshToast = document.getElementById('autoRefreshToast');
+    const autoRefreshToastText = document.getElementById('autoRefreshToastText');
+    const stopAutoRefreshBtn = document.getElementById('stopAutoRefreshBtn');
+    const keepAutoRefreshBtn = document.getElementById('keepAutoRefreshBtn');
+
     let loadingProgressTimer = null;
     let loadingStartedAt = null;
+    let isSearchInProgress = false;
+    let currentSearchController = null;
+
+    let autoRefreshEnabled = true;
+    let hasSuccessfulSearch = false;
+    let lastSearchKeyword = '';
+    let nextAutoRefreshAt = null;
+    let autoRefreshTimerId = null;
+    let warningShownThisCycle = false;
 
     loadInitialSponsored();
+    loadAutoRefreshPreference();
+    renderAutoRefreshState();
 
     searchForm.addEventListener('submit', async (e) => {
         e.preventDefault();
 
         const keyword = keywordInput.value.trim();
+        await executeSearch(keyword, false);
+    });
+
+    if (cancelSearchBtn) {
+        cancelSearchBtn.addEventListener('click', () => {
+            if (isSearchInProgress && currentSearchController) {
+                currentSearchController.abort();
+            }
+        });
+    }
+
+    if (autoRefreshToggle) {
+        autoRefreshToggle.addEventListener('click', () => {
+            setAutoRefreshEnabled(!autoRefreshEnabled);
+        });
+    }
+
+    if (stopAutoRefreshBtn) {
+        stopAutoRefreshBtn.addEventListener('click', () => {
+            setAutoRefreshEnabled(false);
+            hideAutoRefreshToast();
+        });
+    }
+
+    if (keepAutoRefreshBtn) {
+        keepAutoRefreshBtn.addEventListener('click', () => {
+            warningShownThisCycle = true;
+            hideAutoRefreshToast();
+        });
+    }
+
+    async function executeSearch(rawKeyword, triggeredByAutoRefresh) {
+        const keyword = (rawKeyword || '').trim();
         if (!keyword || keyword.length < 2) {
             showError('Kata kunci minimal 2 karakter');
             return;
         }
 
+        if (isSearchInProgress) {
+            return;
+        }
+
+        isSearchInProgress = true;
+        currentSearchController = new AbortController();
+        hideAutoRefreshToast();
+
         // Reset UI
         hideAll();
         loading.classList.remove('hidden');
         searchBtn.disabled = true;
-        searchBtn.textContent = 'Memproses...';
+        searchBtn.textContent = triggeredByAutoRefresh ? 'Auto Update...' : 'Memproses...';
+        if (cancelSearchBtn) {
+            cancelSearchBtn.classList.remove('hidden');
+            cancelSearchBtn.disabled = false;
+        }
         startLoadingProgress();
 
         try {
-            const response = await fetch(`/api/scrape?keyword=${encodeURIComponent(keyword)}&limit=10`);
+            const response = await fetch(`/api/scrape?keyword=${encodeURIComponent(keyword)}&limit=10`, {
+                signal: currentSearchController.signal,
+            });
             const data = await response.json();
 
             if (!response.ok) {
@@ -42,20 +114,48 @@
                 throw new Error(data.error || 'Terjadi kesalahan');
             }
 
-            if (data.success) {
-                displayResults(data);
-            } else {
+            if (!data.success) {
                 throw new Error(data.error || 'Gagal mengambil data');
             }
+
+            displayResults(data);
+            hasSuccessfulSearch = true;
+            lastSearchKeyword = keyword;
+
+            if (autoRefreshEnabled) {
+                scheduleNextAutoRefresh();
+            } else {
+                clearAutoRefreshSchedule();
+                renderAutoRefreshState();
+            }
         } catch (err) {
+            if (err.name === 'AbortError') {
+                showError('Pencarian dibatalkan.');
+                renderAutoRefreshState();
+                return;
+            }
+
             showError(err.message);
+
+            // Keep trying in background when auto update is ON and we already have a valid previous search state.
+            if (autoRefreshEnabled && hasSuccessfulSearch && triggeredByAutoRefresh) {
+                scheduleNextAutoRefresh(60 * 1000);
+            } else {
+                renderAutoRefreshState();
+            }
         } finally {
             stopLoadingProgress(true);
             searchBtn.disabled = false;
             searchBtn.textContent = 'Cari Sekarang';
+            if (cancelSearchBtn) {
+                cancelSearchBtn.classList.add('hidden');
+                cancelSearchBtn.disabled = true;
+            }
             loading.classList.add('hidden');
+            isSearchInProgress = false;
+            currentSearchController = null;
         }
-    });
+    }
 
     function hideAll() {
         error.classList.add('hidden');
@@ -67,6 +167,164 @@
         hideAll();
         errorMsg.textContent = msg;
         error.classList.remove('hidden');
+    }
+
+    function loadAutoRefreshPreference() {
+        try {
+            const saved = localStorage.getItem(AUTO_REFRESH_STORAGE_KEY);
+            autoRefreshEnabled = saved !== 'off';
+        } catch (err) {
+            autoRefreshEnabled = true;
+        }
+    }
+
+    function persistAutoRefreshPreference() {
+        try {
+            localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, autoRefreshEnabled ? 'on' : 'off');
+        } catch (err) {
+            // Ignore storage errors so search flow stays functional.
+        }
+    }
+
+    function setAutoRefreshEnabled(enabled) {
+        autoRefreshEnabled = enabled;
+        persistAutoRefreshPreference();
+
+        if (!autoRefreshEnabled) {
+            clearAutoRefreshSchedule();
+            hideAutoRefreshToast();
+        } else if (hasSuccessfulSearch && lastSearchKeyword) {
+            scheduleNextAutoRefresh();
+        }
+
+        renderAutoRefreshState();
+    }
+
+    function scheduleNextAutoRefresh(delayMs = AUTO_REFRESH_INTERVAL_MS) {
+        if (!autoRefreshEnabled || !hasSuccessfulSearch || !lastSearchKeyword) {
+            clearAutoRefreshSchedule();
+            renderAutoRefreshState();
+            return;
+        }
+
+        if (autoRefreshTimerId) {
+            clearInterval(autoRefreshTimerId);
+            autoRefreshTimerId = null;
+        }
+
+        warningShownThisCycle = false;
+        nextAutoRefreshAt = Date.now() + delayMs;
+        renderAutoRefreshState();
+
+        autoRefreshTimerId = setInterval(() => {
+            if (!autoRefreshEnabled) {
+                clearAutoRefreshSchedule();
+                renderAutoRefreshState();
+                return;
+            }
+
+            const remainingMs = (nextAutoRefreshAt || 0) - Date.now();
+
+            if (remainingMs <= 0) {
+                triggerAutoRefresh();
+                return;
+            }
+
+            if (remainingMs <= WARNING_SECONDS * 1000 && !warningShownThisCycle) {
+                warningShownThisCycle = true;
+                showAutoRefreshToast();
+            }
+
+            if (!autoRefreshToast.classList.contains('hidden')) {
+                updateAutoRefreshToastMessage(remainingMs);
+            }
+
+            renderAutoRefreshState();
+        }, 1000);
+    }
+
+    function clearAutoRefreshSchedule() {
+        if (autoRefreshTimerId) {
+            clearInterval(autoRefreshTimerId);
+            autoRefreshTimerId = null;
+        }
+
+        nextAutoRefreshAt = null;
+        warningShownThisCycle = false;
+    }
+
+    async function triggerAutoRefresh() {
+        hideAutoRefreshToast();
+
+        if (!autoRefreshEnabled || !hasSuccessfulSearch || !lastSearchKeyword) {
+            clearAutoRefreshSchedule();
+            renderAutoRefreshState();
+            return;
+        }
+
+        if (isSearchInProgress) {
+            scheduleNextAutoRefresh(15 * 1000);
+            return;
+        }
+
+        await executeSearch(lastSearchKeyword, true);
+    }
+
+    function renderAutoRefreshState() {
+        if (!autoRefreshBadge || !autoRefreshHint || !autoRefreshTimer || !autoRefreshToggle) {
+            return;
+        }
+
+        if (!autoRefreshEnabled) {
+            autoRefreshBadge.textContent = 'Auto update OFF';
+            autoRefreshBadge.classList.add('off');
+            autoRefreshHint.textContent = 'Auto update dimatikan. Klik nyalakan untuk aktifkan lagi kapan pun.';
+            autoRefreshTimer.textContent = 'Dimatikan oleh user';
+            autoRefreshToggle.textContent = 'Nyalakan Auto Update';
+            return;
+        }
+
+        autoRefreshBadge.textContent = 'Auto update ON';
+        autoRefreshBadge.classList.remove('off');
+        autoRefreshToggle.textContent = 'Matikan Auto Update';
+
+        if (!hasSuccessfulSearch || !lastSearchKeyword || !nextAutoRefreshAt) {
+            autoRefreshHint.textContent = 'Auto update akan aktif setelah pencarian pertama berhasil.';
+            autoRefreshTimer.textContent = 'Belum dijadwalkan';
+            return;
+        }
+
+        const remainingMs = Math.max(0, nextAutoRefreshAt - Date.now());
+        const timerLabel = formatRemaining(remainingMs);
+
+        autoRefreshTimer.textContent = `Update berikutnya dalam ${timerLabel}`;
+        if (remainingMs <= WARNING_SECONDS * 1000) {
+            autoRefreshHint.textContent = `Auto scrape untuk "${lastSearchKeyword}" akan berjalan sebentar lagi.`;
+        } else {
+            autoRefreshHint.textContent = `Auto scrape aktif untuk kata kunci "${lastSearchKeyword}" setiap 15 menit.`;
+        }
+    }
+
+    function formatRemaining(ms) {
+        const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+
+    function showAutoRefreshToast() {
+        const remainingMs = Math.max(0, (nextAutoRefreshAt || 0) - Date.now());
+        updateAutoRefreshToastMessage(remainingMs);
+        autoRefreshToast.classList.remove('hidden');
+    }
+
+    function hideAutoRefreshToast() {
+        autoRefreshToast.classList.add('hidden');
+    }
+
+    function updateAutoRefreshToastMessage(remainingMs) {
+        const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
+        autoRefreshToastText.textContent = `Auto update akan berjalan dalam ${seconds} detik. Klik Berhenti jika ingin mematikan otomatis.`;
     }
 
     function startLoadingProgress() {

@@ -1,0 +1,18 @@
+<svg width="640" height="360" viewBox="0 0 640 360" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="22" y1="28" x2="610" y2="330" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FB923C"/>
+      <stop offset="0.55" stop-color="#EA580C"/>
+      <stop offset="1" stop-color="#A63A06"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="360" rx="28" fill="url(#bg)"/>
+  <circle cx="96" cy="96" r="72" fill="white" fill-opacity="0.16"/>
+  <rect x="210" y="70" width="128" height="214" rx="26" fill="#111827"/>
+  <rect x="220" y="84" width="108" height="186" rx="18" fill="#FFE7D6"/>
+  <rect x="364" y="96" width="118" height="84" rx="16" fill="#7C2D12"/>
+  <rect x="379" y="112" width="88" height="54" rx="10" fill="#FDBA74"/>
+  <circle cx="430" cy="240" r="48" fill="#FDE68A"/>
+  <circle cx="430" cy="240" r="28" fill="#B45309"/>
+  <text x="36" y="324" fill="white" font-family="Arial, sans-serif" font-size="31" font-weight="700">PROMO SPECIAL BUNDLE</text>
+</svg>

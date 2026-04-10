@@ -1,0 +1,20 @@
+<svg width="640" height="360" viewBox="0 0 640 360" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="34" y1="22" x2="600" y2="344" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#22C1DC"/>
+      <stop offset="0.5" stop-color="#0E8FD6"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#091D43"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="360" rx="28" fill="url(#bg)"/>
+  <circle cx="84" cy="74" r="48" fill="white" fill-opacity="0.2"/>
+  <rect x="154" y="78" width="332" height="186" rx="16" fill="#DCE7FF"/>
+  <rect x="168" y="90" width="304" height="160" rx="10" fill="url(#screen)"/>
+  <path d="M126 286H514L464 318H176L126 286Z" fill="#9FB5E7"/>
+  <rect x="120" y="272" width="400" height="18" rx="9" fill="#C8D6F4"/>
+  <text x="38" y="334" fill="white" font-family="Arial, sans-serif" font-size="30" font-weight="700">LAPTOP DEAL WEEK</text>
+</svg>
