@@ -1,5 +1,5 @@
 (() => {
-    const AUTO_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
+    const DEFAULT_AUTO_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
     const WARNING_SECONDS = 10;
     const AUTO_REFRESH_STORAGE_KEY = 'pc:auto-refresh-enabled';
 
@@ -35,6 +35,7 @@
     let nextAutoRefreshAt = null;
     let autoRefreshTimerId = null;
     let warningShownThisCycle = false;
+    let autoRefreshIntervalMs = DEFAULT_AUTO_REFRESH_INTERVAL_MS;
 
     loadInitialSponsored();
     loadAutoRefreshPreference();
@@ -121,6 +122,7 @@
             displayResults(data);
             hasSuccessfulSearch = true;
             lastSearchKeyword = keyword;
+            updateAutoRefreshIntervalFromResponse(data.cache_ttl_minutes);
 
             if (autoRefreshEnabled) {
                 scheduleNextAutoRefresh();
@@ -200,7 +202,7 @@
         renderAutoRefreshState();
     }
 
-    function scheduleNextAutoRefresh(delayMs = AUTO_REFRESH_INTERVAL_MS) {
+    function scheduleNextAutoRefresh(delayMs = autoRefreshIntervalMs) {
         if (!autoRefreshEnabled || !hasSuccessfulSearch || !lastSearchKeyword) {
             clearAutoRefreshSchedule();
             renderAutoRefreshState();
@@ -301,8 +303,31 @@
         if (remainingMs <= WARNING_SECONDS * 1000) {
             autoRefreshHint.textContent = `Auto scrape untuk "${lastSearchKeyword}" akan berjalan sebentar lagi.`;
         } else {
-            autoRefreshHint.textContent = `Auto scrape aktif untuk kata kunci "${lastSearchKeyword}" setiap 15 menit.`;
+            autoRefreshHint.textContent = `Auto scrape aktif untuk kata kunci "${lastSearchKeyword}" setiap ${formatIntervalLabel(autoRefreshIntervalMs)}.`;
         }
+    }
+
+    function updateAutoRefreshIntervalFromResponse(cacheTtlMinutes) {
+        const parsed = Number(cacheTtlMinutes);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+            autoRefreshIntervalMs = DEFAULT_AUTO_REFRESH_INTERVAL_MS;
+            return;
+        }
+
+        autoRefreshIntervalMs = Math.round(parsed * 60 * 1000);
+    }
+
+    function formatIntervalLabel(intervalMs) {
+        const minutes = intervalMs / (60 * 1000);
+        if (!Number.isFinite(minutes) || minutes <= 0) {
+            return '15 menit';
+        }
+
+        if (Number.isInteger(minutes)) {
+            return `${minutes} menit`;
+        }
+
+        return `${minutes.toFixed(1)} menit`;
     }
 
     function formatRemaining(ms) {

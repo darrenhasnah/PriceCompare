@@ -14,7 +14,7 @@ class ScraperController extends Controller
 {
     private ScraperService $scraperService;
     private SponsoredProductService $sponsoredProductService;
-    private int $cacheTTL = 15; // minutes
+    private int $cacheTTL = 1; // minutes
 
     public function __construct(ScraperService $scraperService, SponsoredProductService $sponsoredProductService)
     {
